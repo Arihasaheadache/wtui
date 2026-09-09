@@ -1,0 +1,12 @@
+[package]
+name = "wtui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tokio = { version = "1.40", features = ["full"] }
+futures-util = "0.3"
+zbus = "4.4"
+qrcode = "0.14"
