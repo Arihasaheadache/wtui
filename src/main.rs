@@ -3,7 +3,7 @@ mod dbus;
 mod qr;
 mod ui;
 
-use app::App;
+use app::{App, ViewMode};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -14,61 +14,80 @@ use std::{error::Error, io, time::Duration};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // 1. Setup terminal in raw mode and enter alternate screen
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // 2. Initialize application state
     let mut app = App::new();
 
-    // 3. Connect to NetworkManager via D-Bus and perform initial fetch
     if let Ok(nm) = dbus::NmClient::new().await {
         app.refresh_networks(&nm).await;
     }
 
-    // 4. Main event & render loop
-    let tick_rate = Duration::from_millis(250);
+    let tick_rate = Duration::from_millis(100); // 100ms provides fluid cloud movement
     let mut last_tick = std::time::Instant::now();
 
     loop {
-        // Draw the frame
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
-        // Calculate remaining timeout until the next tick
         let timeout = tick_rate
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
-        // Poll for input events
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
-                // Only handle Press events (ignore KeyRelease events)
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => {
-                            break;
+                        KeyCode::Char('q') => {
+                            if app.view_mode == ViewMode::SpeedTest {
+                                app.view_mode = ViewMode::Normal;
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if app.view_mode == ViewMode::SpeedTest {
+                                app.view_mode = ViewMode::Normal;
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Char('n') => {
+                            app.toggle_speed_test();
                         }
                         KeyCode::Char('j') | KeyCode::Down => {
-                            app.next_network();
+                            if app.view_mode == ViewMode::Normal {
+                                app.next_network();
+                            }
                         }
                         KeyCode::Char('k') | KeyCode::Up => {
-                            app.previous_network();
+                            if app.view_mode == ViewMode::Normal {
+                                app.previous_network();
+                            }
                         }
                         KeyCode::Char('s') => {
-                            app.toggle_qr().await;
+                            if app.view_mode == ViewMode::Normal {
+                                app.toggle_qr().await;
+                            }
                         }
                         KeyCode::Char('a') => {
-                            app.toggle_autoconnect().await;
+                            if app.view_mode == ViewMode::Normal {
+                                app.toggle_autoconnect().await;
+                            }
                         }
                         KeyCode::Char('c') => {
-                            app.toggle_connect().await;
+                            if app.view_mode == ViewMode::Normal {
+                                app.toggle_connect().await;
+                            }
                         }
                         KeyCode::Char('r') => {
-                            // Rescan networks
-                            app.rescan().await;
+                            if app.view_mode == ViewMode::Normal {
+                                app.rescan().await;
+                            } else {
+                                app.start_speed_test();
+                            }
                         }
                         _ => {}
                     }
@@ -76,7 +95,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
-        // Periodic background tick
         if last_tick.elapsed() >= tick_rate {
             app.on_tick().await;
             last_tick = std::time::Instant::now();
@@ -87,7 +105,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // 5. Restore terminal to normal mode cleanly
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),

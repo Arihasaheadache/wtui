@@ -1,4 +1,4 @@
-use crate::app::{App, NetworkKind};
+use crate::app::{App, NetworkKind, ViewMode};
 use crate::qr::generate_wifi_qr_lines;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -11,10 +11,7 @@ use ratatui::{
 pub struct Theme;
 
 impl Theme {
-    // Preserve terminal alpha transparency for Hyprland compositor blur
     pub const BG: Color = Color::Reset;
-
-    // Catppuccin Mocha palette
     pub const BORDER: Color = Color::Rgb(108, 112, 134);       // Slate Muted
     pub const PRIMARY: Color = Color::Rgb(137, 180, 250);      // Soft Blue
     pub const ACCENT: Color = Color::Rgb(203, 166, 247);       // Mauve
@@ -38,7 +35,11 @@ impl Theme {
 pub fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
-    // 1. Primary Horizontal Split: Left 50% (Panels), Right 50% (QR Pane)
+    if app.view_mode == ViewMode::SpeedTest {
+        render_speed_test(f, app, size);
+        return;
+    }
+
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -47,7 +48,6 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(size);
 
-    // 2. Sub-divide Left side vertically: 50% Network List, 50% Detailed Controls
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -198,9 +198,11 @@ fn render_network_details(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled("QR Code", Style::default().fg(Theme::TEXT)),
             ]),
             Line::from(vec![
-                Span::styled("  [r] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled("  [n] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled("Speed Test", Style::default().fg(Theme::TEXT)),
+                Span::styled("    [r] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
                 Span::styled("Rescan", Style::default().fg(Theme::TEXT)),
-                Span::styled("       [q] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled("        [q] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
                 Span::styled("Quit", Style::default().fg(Theme::TEXT)),
             ]),
             Line::from(""),
@@ -260,7 +262,6 @@ fn render_qr_pane(f: &mut Frame, app: &App, area: Rect) {
             let password = app.qr_password.as_deref().unwrap_or("");
             let mut qr_lines = generate_wifi_qr_lines(&net.name, password, security);
 
-            // Detailed preview lines showing actual extracted credentials
             qr_lines.push(Line::from(""));
             qr_lines.push(Line::from(vec![
                 Span::styled("  SSID: ", Style::default().fg(Theme::PRIMARY)),
@@ -298,4 +299,203 @@ fn render_qr_pane(f: &mut Frame, app: &App, area: Rect) {
         .style(Style::default().fg(Theme::MUTED).bg(Theme::BG));
 
     f.render_widget(unsupported, area);
+}
+
+fn render_speed_test(f: &mut Frame, app: &App, area: Rect) {
+    let main_block = Theme::container_block("Network Performance");
+    let inner = main_block.inner(area);
+    f.render_widget(main_block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(62),
+            Constraint::Percentage(38),
+        ])
+        .split(inner);
+
+    render_cloud_visual(f, app, chunks[0]);
+    render_speed_metrics(f, app, chunks[1]);
+}
+
+// Procedural pseudo-random 2D hash for natural noise synthesis
+fn pseudo_noise(x: f64, y: f64) -> f64 {
+    let n = (x * 12.9898 + y * 78.233).sin() * 43758.5453123;
+    n - n.floor()
+}
+
+// Smoothly interpolated 2D noise layer
+fn smooth_noise(x: f64, y: f64) -> f64 {
+    let i = x.floor();
+    let j = y.floor();
+    let fx = x - i;
+    let fy = y - j;
+
+    // Quintic S-curve for artifact-free transitions
+    let u = fx * fx * fx * (fx * (fx * 6.0 - 15.0) + 10.0);
+    let v = fy * fy * fy * (fy * (fy * 6.0 - 15.0) + 10.0);
+
+    let a = pseudo_noise(i, j);
+    let b = pseudo_noise(i + 1.0, j);
+    let c = pseudo_noise(i, j + 1.0);
+    let d = pseudo_noise(i + 1.0, j + 1.0);
+
+    let top = a + u * (b - a);
+    let bottom = c + u * (d - c);
+    top + v * (bottom - top)
+}
+
+// Multi-octave fractal noise generating billowing cloud structures
+fn fractal_clouds(x: f64, y: f64) -> f64 {
+    let mut total = 0.0;
+    let mut amplitude = 1.0;
+    let mut frequency = 1.0;
+    let mut max_value = 0.0;
+
+    for _ in 0..4 {
+        total += smooth_noise(x * frequency, y * frequency) * amplitude;
+        max_value += amplitude;
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+
+    total / max_value
+}
+
+fn render_cloud_visual(f: &mut Frame, app: &App, area: Rect) {
+    let w = area.width as usize;
+    let h = area.height as usize;
+    if w < 10 || h < 4 {
+        return;
+    }
+
+    // Dynamic drifting rate linked gently to current speed
+    let active_speed = app
+        .speed_test
+        .download_mbps
+        .or(app.speed_test.upload_mbps)
+        .unwrap_or(20.0);
+
+    // Kept intentionally subtle: smooth slow float that gently breathes
+    let speed_influence = (active_speed / 50.0).clamp(0.4, 2.5);
+    let time = (app.anim_frame as f64) * 0.018 * speed_influence;
+
+    // Clean dot matrix & fine braille characters (from lightest vapor to core density)
+    let braille_levels = [' ', '⠁', '⠂', '⠒', '⠔', '⠢', '⠖', '⠶', '⠷', '⠿'];
+
+    let mut lines = Vec::with_capacity(h);
+
+    for y in 0..h {
+        let mut spans = Vec::with_capacity(w);
+        let ny = (y as f64) / (h as f64);
+
+        for x in 0..w {
+            let nx = (x as f64) / (w as f64);
+
+            // Scale aspect ratio so clouds don't look vertically squished on tall fonts
+            let sample_x = nx * 3.4 + time * 0.6;
+            let sample_y = ny * 1.8 + (time * 0.15).sin() * 0.2;
+
+            // Generate fractal density field
+            let mut density = fractal_clouds(sample_x, sample_y);
+
+            // Add smooth vertical edge attenuation to make clouds float cleanly within the frame
+            let edge_falloff = ((ny * std::f64::consts::PI).sin()).powf(0.85);
+            density *= edge_falloff;
+
+            // Subtle contrast threshold
+            let shifted = (density - 0.22) / 0.78;
+            let val = shifted.clamp(0.0, 1.0);
+
+            let (ch, style) = if val > 0.75 {
+                let idx = ((val - 0.75) / 0.25 * (braille_levels.len() - 1) as f64) as usize;
+                (
+                    braille_levels[idx.min(braille_levels.len() - 1)],
+                    Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD),
+                )
+            } else if val > 0.42 {
+                let idx = ((val - 0.42) / 0.33 * 6.0) as usize;
+                (
+                    braille_levels[idx.min(5)],
+                    Style::default().fg(Theme::PRIMARY),
+                )
+            } else if val > 0.18 {
+                (
+                    '·',
+                    Style::default().fg(Theme::BORDER),
+                )
+            } else {
+                (' ', Style::default().fg(Theme::BG))
+            };
+
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let p = Paragraph::new(lines).alignment(Alignment::Center);
+    f.render_widget(p, area);
+}
+
+fn render_speed_metrics(f: &mut Frame, app: &App, area: Rect) {
+    let ping = app
+        .speed_test
+        .ping_ms
+        .map_or("---".to_string(), |v| format!("{:.1} ms", v));
+    let dl = app
+        .speed_test
+        .download_mbps
+        .map_or("---".to_string(), |v| format!("{:.2} Mbps", v));
+    let ul = app
+        .speed_test
+        .upload_mbps
+        .map_or("---".to_string(), |v| format!("{:.2} Mbps", v));
+
+    // Compact inline bar
+    let total_bar_cells: usize = 24;
+    let filled_cells = ((app.speed_test.progress_pct as usize) * total_bar_cells) / 100;
+    let empty_cells = total_bar_cells.saturating_sub(filled_cells);
+
+    let bar_spans = vec![
+        Span::styled("  Test Progress: ", Style::default().fg(Theme::PRIMARY)),
+        Span::styled("[", Style::default().fg(Theme::BORDER)),
+        Span::styled("─".repeat(filled_cells), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(" ".repeat(empty_cells), Style::default().fg(Theme::HIGHLIGHT)),
+        Span::styled(
+            format!("] {:>3}%  ", app.speed_test.progress_pct),
+            Style::default().fg(Theme::TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("({})", app.speed_test.stage), Style::default().fg(Theme::MUTED)),
+    ];
+
+    let stats = vec![
+        Line::from(""),
+        Line::from(bar_spans),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Latency:   ", Style::default().fg(Theme::PRIMARY)),
+            Span::styled(format!("{:<14}", ping), Style::default().fg(Theme::SUCCESS).add_modifier(Modifier::BOLD)),
+            Span::styled("Download:  ", Style::default().fg(Theme::PRIMARY)),
+            Span::styled(format!("{:<16}", dl), Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("Upload:    ", Style::default().fg(Theme::PRIMARY)),
+            Span::styled(ul, Style::default().fg(Theme::WARNING).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  [r] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("Restart Test    ", Style::default().fg(Theme::TEXT)),
+            Span::styled("[n] / [Esc] ", Style::default().fg(Theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled("Back to Networks", Style::default().fg(Theme::TEXT)),
+        ]),
+    ];
+
+    let p = Paragraph::new(stats)
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::default().fg(Theme::HIGHLIGHT)),
+        )
+        .alignment(Alignment::Left);
+
+    f.render_widget(p, area);
 }
