@@ -36,6 +36,7 @@ The interface is built with modern wayland compositors in mind, and works well w
 | c | Connect / Disconnect selected network |
 | a | Toggle connection autoconnect state |
 | s | Toggle mobile Wi-Fi sharing QR code pane |
+| n | Toggle Internet Speed Test tab |
 | r | Request a fresh Wi-Fi rescan |
 | q / Esc | Exit application |
 
