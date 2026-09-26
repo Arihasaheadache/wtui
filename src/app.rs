@@ -1,5 +1,14 @@
 use crate::dbus::NmClient;
 
+#[derive(Debug, Clone)]
+pub enum UiEvent {
+    Status(String),
+    Networks(Result<Vec<NetworkEntry>, String>),
+    PasswordFetched(Result<String, String>),
+    RequestRefresh,
+    NeedPassword(NetworkEntry),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewMode {
     Normal,
@@ -30,6 +39,15 @@ pub enum NetworkKind {
     },
 }
 
+impl NetworkKind {
+    pub fn security(&self) -> Option<&str> {
+        match self {
+            NetworkKind::Wireless { security, .. } => Some(security),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct NetworkEntry {
     pub name: String,
@@ -40,6 +58,15 @@ pub struct NetworkEntry {
     pub gateway: Option<String>,
     pub dbus_path: String,
     pub connection_path: Option<String>,
+    pub ap_path: Option<String>,
+}
+
+#[derive(Default)]
+pub struct PasswordModalState {
+    pub open: bool,
+    pub entry: Option<NetworkEntry>,
+    pub input: String,
+    pub error: Option<String>,
 }
 
 pub struct App {
@@ -52,7 +79,8 @@ pub struct App {
     pub view_mode: ViewMode,
     pub speed_test: SpeedTestData,
     pub anim_frame: usize,
-    nm_client: Option<NmClient>,
+    pub password_modal: PasswordModalState,
+    pub nm_client: Option<NmClient>,
 }
 
 impl App {
@@ -67,16 +95,43 @@ impl App {
             view_mode: ViewMode::Normal,
             speed_test: SpeedTestData::default(),
             anim_frame: 0,
+            password_modal: PasswordModalState::default(),
             nm_client: None,
         }
     }
 
+    pub fn set_status<S: Into<String>>(&mut self, message: S) {
+        self.status_message = message.into();
+    }
+
     pub fn selected_network(&self) -> Option<&NetworkEntry> {
+        self.networks.get(self.selected_index)
+    }
+
+    pub fn selected_network_cloned(&self) -> Option<NetworkEntry> {
+        self.selected_network().cloned()
+    }
+
+    pub fn clamp_selection(&mut self) {
         if self.networks.is_empty() {
-            None
-        } else {
-            self.networks.get(self.selected_index)
+            self.selected_index = 0;
+        } else if self.selected_index >= self.networks.len() {
+            self.selected_index = self.networks.len() - 1;
         }
+    }
+
+    pub fn set_networks(&mut self, networks: Vec<NetworkEntry>) {
+        let previous_selected = self.selected_network().map(|n| n.name.clone());
+
+        self.networks = networks;
+
+        if let Some(name) = previous_selected {
+            if let Some(index) = self.networks.iter().position(|n| n.name == name) {
+                self.selected_index = index;
+            }
+        }
+
+        self.clamp_selection();
     }
 
     pub fn is_any_connected(&self) -> bool {
@@ -133,81 +188,29 @@ impl App {
         }
     }
 
-    pub async fn refresh_networks(&mut self, client: &NmClient) {
-        match client.fetch_all_networks().await {
-            Ok(nets) => {
-                self.networks = nets;
-                if self.selected_index >= self.networks.len() && !self.networks.is_empty() {
-                    self.selected_index = self.networks.len() - 1;
-                }
-                if self.view_mode == ViewMode::Normal && self.status_message != "network not connected" {
-                    self.status_message = format!("Updated: {} network(s) found", self.networks.len());
-                }
-            }
-            Err(e) => {
-                self.status_message = format!("Error querying D-Bus: {e}");
-            }
-        }
-    }
-
-    pub async fn toggle_qr(&mut self) {
+    pub fn toggle_qr(&mut self) {
         self.show_qr = !self.show_qr;
-        if self.show_qr && self.qr_password.is_none() {
-            self.fetch_password_for_selected().await;
+        if !self.show_qr {
+            self.qr_password = None;
         }
     }
 
-    pub async fn fetch_password_for_selected(&mut self) {
-        if let Some(entry) = self.selected_network() {
-            if let Some(conn_path) = entry.connection_path.as_deref() {
-                if let Some(client) = &self.nm_client {
-                    if let Ok(pwd) = client.get_wifi_password(conn_path).await {
-                        self.qr_password = Some(pwd);
-                        return;
-                    }
-                }
-            }
-        }
-        self.qr_password = Some(String::new());
+    pub fn open_password_modal(&mut self, entry: NetworkEntry) {
+        self.status_message = format!("Password required for {}", entry.name);
+        self.password_modal.open = true;
+        self.password_modal.entry = Some(entry);
+        self.password_modal.input.clear();
+        self.password_modal.error = None;
     }
 
-    pub async fn toggle_autoconnect(&mut self) {
-        if let Some(entry) = self.selected_network().cloned() {
-            if let Some(conn_path) = entry.connection_path.as_deref() {
-                if let Some(client) = &self.nm_client {
-                    let new_state = !entry.autoconnect;
-                    let _ = client.set_autoconnect(conn_path, new_state).await;
-                    self.status_message = format!("Autoconnect set to {}", new_state);
-                    self.rescan().await;
-                }
-            } else {
-                self.status_message = "No saved connection profile to set autoconnect".to_string();
-            }
-        }
+    pub fn close_password_modal(&mut self) {
+        self.password_modal.open = false;
+        self.password_modal.entry = None;
+        self.password_modal.input.clear();
+        self.password_modal.error = None;
     }
 
-    pub async fn toggle_connect(&mut self) {
-        if let Some(entry) = self.selected_network().cloned() {
-            if let Some(client) = &self.nm_client {
-                if entry.is_connected {
-                    self.status_message = format!("Disconnecting from {}...", entry.name);
-                    let _ = client.disconnect_network(&entry.dbus_path).await;
-                } else {
-                    self.status_message = format!("Connecting to {}...", entry.name);
-                    let _ = client.connect_network(&entry).await;
-                }
-            }
-        }
-    }
-
-    pub async fn rescan(&mut self) {
-        if let Some(client) = &self.nm_client {
-            self.status_message = "Scanning for networks (this may take a few seconds)...".to_string();
-            let _ = client.request_wireless_scan().await;
-        }
-    }
-
-    pub async fn on_tick(&mut self) {
+    pub fn on_tick(&mut self) {
         self.anim_frame = self.anim_frame.wrapping_add(1);
 
         if self.view_mode == ViewMode::SpeedTest && self.speed_test.is_running {
@@ -228,16 +231,6 @@ impl App {
                 self.speed_test.is_running = false;
                 self.speed_test.stage = "Complete".to_string();
             }
-        }
-
-        if self.nm_client.is_none() {
-            if let Ok(client) = NmClient::new().await {
-                self.refresh_networks(&client).await;
-                self.nm_client = Some(client);
-            }
-        } else if let Some(client) = &self.nm_client {
-            let client_clone = client.clone();
-            self.refresh_networks(&client_clone).await;
         }
     }
 }
