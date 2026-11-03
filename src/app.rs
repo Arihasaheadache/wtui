@@ -7,6 +7,27 @@ pub enum UiEvent {
     PasswordFetched(Result<String, String>),
     RequestRefresh,
     NeedPassword(NetworkEntry),
+    // New event for real-time speed test updates
+    SpeedTestUpdate(SpeedTestUpdateData),
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeedTestUpdateData {
+    pub phase: SpeedPhase,
+    pub value: Option<f64>, // ms for ping, Mbps for DL/UL
+    pub progress: u16,      // 0-100 within current phase
+    pub done: bool,
+}
+
+// FIX: Added Default derive here to satisfy SpeedTestData::default()
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SpeedPhase {
+    #[default]
+    Idle,
+    Ping,
+    Download,
+    Upload,
+    Complete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +44,7 @@ pub struct SpeedTestData {
     pub upload_mbps: Option<f64>,
     pub progress_pct: u16,
     pub stage: String,
+    pub current_phase: SpeedPhase,
 }
 
 #[derive(Debug, Clone)]
@@ -122,15 +144,12 @@ impl App {
 
     pub fn set_networks(&mut self, networks: Vec<NetworkEntry>) {
         let previous_selected = self.selected_network().map(|n| n.name.clone());
-
         self.networks = networks;
-
         if let Some(name) = previous_selected {
             if let Some(index) = self.networks.iter().position(|n| n.name == name) {
                 self.selected_index = index;
             }
         }
-
         self.clamp_selection();
     }
 
@@ -142,6 +161,7 @@ impl App {
         match self.view_mode {
             ViewMode::SpeedTest => {
                 self.view_mode = ViewMode::Normal;
+                self.speed_test.is_running = false;
                 self.status_message = "Returned to networks".to_string();
             }
             ViewMode::Normal => {
@@ -162,7 +182,8 @@ impl App {
             download_mbps: None,
             upload_mbps: None,
             progress_pct: 0,
-            stage: "Measuring latency...".to_string(),
+            stage: "Initializing...".to_string(),
+            current_phase: SpeedPhase::Idle,
         };
     }
 
@@ -210,27 +231,63 @@ impl App {
         self.password_modal.error = None;
     }
 
-    pub fn on_tick(&mut self) {
-        self.anim_frame = self.anim_frame.wrapping_add(1);
+    // Process updates from background threads
+    pub fn apply_speed_update(&mut self, update: SpeedTestUpdateData) {
+        if !self.speed_test.is_running {
+            return;
+        }
 
-        if self.view_mode == ViewMode::SpeedTest && self.speed_test.is_running {
-            if self.speed_test.progress_pct < 100 {
-                self.speed_test.progress_pct = (self.speed_test.progress_pct + 2).min(100);
-
-                if self.speed_test.progress_pct <= 25 {
-                    self.speed_test.stage = "Measuring ping & jitter...".to_string();
-                    self.speed_test.ping_ms = Some(14.2 + ((self.anim_frame % 5) as f64 * 0.4));
-                } else if self.speed_test.progress_pct <= 65 {
-                    self.speed_test.stage = "Testing Download speed...".to_string();
-                    self.speed_test.download_mbps = Some(184.6 + ((self.anim_frame % 7) as f64 * 1.8));
-                } else {
-                    self.speed_test.stage = "Testing Upload speed...".to_string();
-                    self.speed_test.upload_mbps = Some(42.1 + ((self.anim_frame % 4) as f64 * 0.9));
+        match update.phase {
+            SpeedPhase::Ping => {
+                self.speed_test.current_phase = SpeedPhase::Ping;
+                self.speed_test.stage = "Measuring Latency...".to_string();
+                if let Some(val) = update.value {
+                    self.speed_test.ping_ms = Some(val);
                 }
-            } else {
+                if update.done {
+                    self.speed_test.progress_pct = 25;
+                } else {
+                     self.speed_test.progress_pct = (update.progress / 4).min(25);
+                }
+            }
+            SpeedPhase::Download => {
+                self.speed_test.current_phase = SpeedPhase::Download;
+                self.speed_test.stage = "Testing Download...".to_string();
+                if let Some(val) = update.value {
+                    self.speed_test.download_mbps = Some(val);
+                }
+                // Map phase progress (0-100) to overall (25-75)
+                self.speed_test.progress_pct = 25 + (update.progress / 2);
+                if update.done {
+                    self.speed_test.progress_pct = 75;
+                }
+            }
+            SpeedPhase::Upload => {
+                self.speed_test.current_phase = SpeedPhase::Upload;
+                self.speed_test.stage = "Testing Upload...".to_string();
+                if let Some(val) = update.value {
+                    self.speed_test.upload_mbps = Some(val);
+                }
+                // Map phase progress (0-100) to overall (75-100)
+                self.speed_test.progress_pct = 75 + (update.progress / 4);
+                if update.done {
+                    self.speed_test.progress_pct = 100;
+                    self.speed_test.is_running = false;
+                    self.speed_test.stage = "Complete".to_string();
+                }
+            }
+            SpeedPhase::Complete => {
                 self.speed_test.is_running = false;
                 self.speed_test.stage = "Complete".to_string();
+                self.speed_test.progress_pct = 100;
             }
+            _ => {}
         }
+    }
+
+    pub fn on_tick(&mut self) {
+        self.anim_frame = self.anim_frame.wrapping_add(1);
+        // No longer simulating fake speeds here. 
+        // UI updates happen via apply_speed_update events.
     }
 }
